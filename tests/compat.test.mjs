@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const agentDir = await mkdtemp(join(tmpdir(), "pi-codex-compat-test-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
+const legacyPromptDir = join(agentDir, "codex-request-compat");
+await mkdir(legacyPromptDir, { recursive: true });
+await writeFile(join(legacyPromptDir, "codex-instructions.txt"), "You are Codex, but this override is stale.");
 
 const calls = [];
 globalThis.fetch = async (input, init) => {
@@ -90,11 +94,19 @@ try {
   assert.equal(sentBody.input[1].type, "message");
   assert.equal(sentBody.input[1].role, "developer");
   assert.match(sentBody.input[1].content[0].text, /^You are Codex/);
+  const packagedPrompt = (await readFile(new URL("../assets/codex-instructions.txt", import.meta.url), "utf8")).trim();
+  assert.equal(sentBody.input[1].content[0].text, packagedPrompt, "developer prompt must be byte-identical");
+  assert.equal(createHash("sha256").update(packagedPrompt).digest("hex"), "e9778714d505f3dd04d44db4394024c5fab5bf6554fc9faa3cdf9cf776b63bb9");
   assert.deepEqual(sentBody.input[2], {
     type: "message",
-    role: "developer",
-    content: [{ type: "input_text", text: "Pi system prompt" }],
+    role: "user",
+    content: [{ type: "input_text", text: "<client_context>\nPi system prompt\n</client_context>" }],
   });
+  assert.equal(
+    sentBody.input.filter((item) => item.type === "message" && item.role === "developer").length,
+    1,
+    "only the native Codex prompt may remain developer-scoped",
+  );
   assert.equal(sentBody.input[3].type, "message");
   assert.equal(sentBody.tool_choice, "auto");
   assert.equal(sentBody.parallel_tool_calls, false);
@@ -119,7 +131,7 @@ try {
   );
   assert.equal("service_tier" in twice, false);
 
-  console.log("PASS: Responses Lite shape, metadata, idempotence, tools, and standard billing tier");
+  console.log("PASS: native developer prompt, supplemental Pi context, Lite shape, tools, and standard tier");
 } finally {
   await rm(agentDir, { recursive: true, force: true });
 }

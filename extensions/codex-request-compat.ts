@@ -167,10 +167,10 @@ async function buildUserAgent(): Promise<string> {
 	);
 }
 
-// Prefer a user override in the Pi data directory, then the packaged prompt.
-// The built-in identity line is only a last-resort fallback.
+// The packaged prompt is the versioned wire baseline and must win over any
+// stale user-side override when a gateway validates the native prompt exactly.
 async function loadCodexInstructions(): Promise<string> {
-	for (const path of [CODEX_INSTRUCTIONS_PATH, PACKAGED_INSTRUCTIONS_PATH]) {
+	for (const path of [PACKAGED_INSTRUCTIONS_PATH, CODEX_INSTRUCTIONS_PATH]) {
 		try {
 			const text = (await readFile(path, "utf8")).trim();
 			if (text) return text;
@@ -311,10 +311,24 @@ function transformCodexRequest(init: RequestInit): RequestInit | undefined {
 			.filter((item) => !isAdditionalToolsItem(item) && !isCodexPromptItem(item))
 			.map((item) => {
 				if (!isObject(item) || typeof item.role !== "string") return item;
+				const isSupplementalContext = item.role === "developer" || item.role === "system";
+				const role = isSupplementalContext ? "user" : item.role;
 				if (typeof item.content === "string") {
-					return { ...item, type: "message", content: [{ type: "input_text", text: item.content }] };
+					const text = isSupplementalContext
+						? `<client_context>\n${item.content}\n</client_context>`
+						: item.content;
+					return { ...item, type: "message", role, content: [{ type: "input_text", text }] };
 				}
-				if (Array.isArray(item.content)) return { ...item, type: "message" };
+				if (Array.isArray(item.content)) {
+					const content = isSupplementalContext
+						? [
+								{ type: "input_text", text: "<client_context>" },
+								...item.content,
+								{ type: "input_text", text: "</client_context>" },
+							]
+						: item.content;
+					return { ...item, type: "message", role, content };
+				}
 				return item;
 			});
 		body.input = [

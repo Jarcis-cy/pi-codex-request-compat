@@ -1,6 +1,6 @@
 {
   "name": "pi-codex-request-compat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension that converts OpenAI Responses requests into the Codex Responses Lite wire shape expected by strict Codex gateways.",
   "type": "module",
   "license": "MIT",

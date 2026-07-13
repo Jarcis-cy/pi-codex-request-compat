@@ -46,11 +46,14 @@ Strict gateways can change their validation rules. Re-capture a request from the
 ### Body
 
 - moves top-level tools to `input[0]` as `additional_tools` without renaming Pi tools or changing their JSON schemas;
-- inserts the packaged Codex prompt as a canonical developer message;
+- inserts the packaged Codex prompt as the only text-bearing developer message;
+- reclassifies Pi's system prompt as a typed user message wrapped in `<client_context>`, preserving Pi tool, skill, and project instructions without presenting a non-native developer prompt;
 - canonicalizes role messages to `type: "message"` with typed content arrays;
 - removes non-Codex fields such as `prompt_cache_retention` and `max_output_tokens`;
 - sets Lite controls such as `tool_choice: "auto"`, `parallel_tool_calls: false`, and `reasoning.context: "all_turns"`;
 - keeps header and body metadata projections consistent.
+
+Reclassifying Pi's system prompt lowers its instruction priority from developer to user. This is an intentional compatibility trade-off: Pi-specific guidance remains available to the model, while the gateway sees an unmodified, version-matched Codex developer prompt.
 
 ### Service tier and billing
 
@@ -91,7 +94,7 @@ pi install git:github.com/Jarcis-cy/pi-codex-request-compat
 Pin a release for reproducible behavior:
 
 ```bash
-pi install git:github.com/Jarcis-cy/pi-codex-request-compat@v0.1.0
+pi install git:github.com/Jarcis-cy/pi-codex-request-compat@v0.1.1
 ```
 
 Restart Pi after installation. Use `pi list` to confirm that the package is enabled.
@@ -167,21 +170,21 @@ The JSON stored in `x-codex-turn-metadata` must be identical in the header and i
 
 If these projections drift, strict gateways may reject fallback and subagent requests while direct Pi requests continue to work.
 
-## Prompt override
+## Prompt baseline
 
-The packaged prompt is stored at:
+The version-matched native Codex prompt is stored at:
 
 ```text
 assets/codex-instructions.txt
 ```
 
-A user-level override takes precedence when present:
+The packaged asset takes precedence because strict gateways may validate the prompt byte-for-byte. The legacy user-side file is used only if the packaged asset cannot be read:
 
 ```text
 ~/.pi/agent/codex-request-compat/codex-instructions.txt
 ```
 
-Keep the opening Codex identity and expected tool behavior aligned with the Codex release being emulated. Remember that Pi's actual tool list still comes from Pi and is transported through `additional_tools`.
+Update the asset, User-Agent version, prompt hash regression test, and captured baseline together. Pi's actual tool list is transported separately through `additional_tools`.
 
 ## Diagnostics and privacy
 
@@ -192,7 +195,7 @@ Runtime state is stored outside the package:
 ├── installation-id
 ├── request-debug.log
 ├── last-failed-request.json
-└── codex-instructions.txt        # optional user override
+└── codex-instructions.txt        # legacy fallback if the packaged asset is unavailable
 ```
 
 On HTTP 4xx/5xx responses, the extension records:
