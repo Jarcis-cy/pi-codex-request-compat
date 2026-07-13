@@ -1,8 +1,40 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const modelId = process.argv[2] ?? "gpt-5.6-sol";
+const profileByModel = {
+  "gpt-5.4": {
+    mode: "standard",
+    asset: "../assets/codex-0.144.1/gpt-5.4-standard.txt",
+    sha: "478e8a11b180adb2659f21aba51744711f79f665039bb0bc4a13d3c051fcb76c",
+  },
+  "gpt-5.5": {
+    mode: "standard",
+    asset: "../assets/codex-0.144.1/gpt-5.5-standard.txt",
+    sha: "c2a980bc28af132eb89e0b4c68ae884043faae83a1afd3fd4889f7e8a1ada7b0",
+  },
+  "gpt-5.6-sol": {
+    mode: "responses-lite",
+    asset: "../assets/codex-0.144.1/gpt-5.6-responses-lite.txt",
+    sha: "e9778714d505f3dd04d44db4394024c5fab5bf6554fc9faa3cdf9cf776b63bb9",
+  },
+  "gpt-5.6-terra": {
+    mode: "responses-lite",
+    asset: "../assets/codex-0.144.1/gpt-5.6-terra-luna-responses-lite.txt",
+    sha: "78a2fc84e1bffa421d865c1a2ade4185d3d33ef38e6a15157f0ff1a89b7d52ec",
+  },
+  "gpt-5.6-luna": {
+    mode: "responses-lite",
+    asset: "../assets/codex-0.144.1/gpt-5.6-terra-luna-responses-lite.txt",
+    sha: "78a2fc84e1bffa421d865c1a2ade4185d3d33ef38e6a15157f0ff1a89b7d52ec",
+  },
+};
+const expectedProfile = profileByModel[modelId];
+if (!expectedProfile) throw new Error(`unsupported integration model: ${modelId}`);
 
 const root = await mkdtemp(join(tmpdir(), "pi-codex-compat-sdk-"));
 const agentDir = join(root, "agent");
@@ -54,8 +86,8 @@ try {
           apiKey: "test-only-key",
           models: [
             {
-              id: "capture-model",
-              name: "Capture model",
+              id: modelId,
+              name: modelId,
               reasoning: true,
               input: ["text"],
               contextWindow: 128000,
@@ -78,7 +110,7 @@ try {
   } = await import("@earendil-works/pi-coding-agent");
   const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
   const modelRegistry = ModelRegistry.create(authStorage, modelsPath);
-  const model = modelRegistry.find("codex", "capture-model");
+  const model = modelRegistry.find("codex", modelId);
   assert.ok(model, "temporary Codex model must load");
 
   const settingsManager = SettingsManager.inMemory({
@@ -123,15 +155,30 @@ try {
   assert.equal(capture.method, "POST");
   assert.equal(capture.url, "/v1/responses");
   assert.equal(capture.headers.originator, "codex_exec");
-  assert.equal(capture.headers["x-openai-internal-codex-responses-lite"], "true");
-  assert.equal(capture.body.input[0].type, "additional_tools");
-  assert.equal("tools" in capture.body, false);
-  assert.equal("instructions" in capture.body, false);
-  assert.equal("service_tier" in capture.body, false);
+  const instructions = await readFile(new URL(expectedProfile.asset, import.meta.url), "utf8");
+  assert.equal(createHash("sha256").update(instructions).digest("hex"), expectedProfile.sha);
   const developerMessages = capture.body.input.filter(
     (item) => item.type === "message" && item.role === "developer",
   );
-  assert.equal(developerMessages.length, 1, "only the native Codex prompt may be developer-scoped");
+  if (expectedProfile.mode === "responses-lite") {
+    assert.equal(capture.headers["x-openai-internal-codex-responses-lite"], "true");
+    assert.equal(capture.body.input[0].type, "additional_tools");
+    assert.equal("tools" in capture.body, false);
+    assert.equal("instructions" in capture.body, false);
+    assert.equal(capture.body.parallel_tool_calls, false);
+    assert.equal(capture.body.reasoning.context, "all_turns");
+    assert.equal(developerMessages.length, 1, "only the native Codex prompt may be developer-scoped");
+    assert.equal(developerMessages[0].content[0].text, instructions);
+  } else {
+    assert.equal("x-openai-internal-codex-responses-lite" in capture.headers, false);
+    assert.ok(Array.isArray(capture.body.tools));
+    assert.equal(capture.body.input.some((item) => item.type === "additional_tools"), false);
+    assert.equal(capture.body.instructions, instructions);
+    assert.equal(capture.body.parallel_tool_calls, true);
+    assert.equal("context" in capture.body.reasoning, false);
+    assert.equal(developerMessages.length, 0, "Pi guidance must not remain developer-scoped");
+  }
+  assert.equal("service_tier" in capture.body, false);
   const turnMetadata = JSON.parse(capture.body.client_metadata["x-codex-turn-metadata"]);
   assert.equal(turnMetadata.request_kind, "compaction");
   assert.equal(
@@ -139,7 +186,7 @@ try {
     capture.headers["x-codex-turn-metadata"],
     "compaction header/body metadata projections must be identical",
   );
-  console.log("PASS: real Pi SDK session.compact() traverses header hook and fetch Lite fallback");
+  console.log(`PASS: Pi SDK session.compact() traverses ${expectedProfile.mode} fetch fallback for ${modelId}`);
 } finally {
   session?.dispose();
   await new Promise((resolve) => server.close(resolve));

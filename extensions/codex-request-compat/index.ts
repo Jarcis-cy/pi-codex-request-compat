@@ -1,7 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.ts";
 import { buildDoctorReport, logTargetFailure, presentDoctorReport } from "./diagnostics.ts";
-import { buildUserAgent, loadCodexInstructions, loadInstallationId, MetadataRuntime } from "./metadata.ts";
+import { buildUserAgent, loadInstallationId, MetadataRuntime } from "./metadata.ts";
+import { loadWireProfiles, selectWireProfile, type CodexWireProfile } from "./profiles.ts";
 import {
 	buildCompatHeaders,
 	isObject,
@@ -11,8 +12,13 @@ import {
 	type CompatRuntimeState,
 } from "./transform.ts";
 
-function isCompatibleModel(ctx: ExtensionContext, providerIds: Set<string>): boolean {
-	return !!ctx.model && providerIds.has(ctx.model.provider) && ctx.model.api === "openai-responses";
+function compatibleProfile(
+	ctx: ExtensionContext,
+	providerIds: Set<string>,
+	profiles: CompatRuntimeState["profiles"],
+): CodexWireProfile | undefined {
+	if (!ctx.model || !providerIds.has(ctx.model.provider) || ctx.model.api !== "openai-responses") return undefined;
+	return selectWireProfile(profiles, ctx.model.id);
 }
 
 function bodyMetadata(metadata: ReturnType<MetadataRuntime["createSnapshot"]>): Record<string, string> {
@@ -33,7 +39,7 @@ export default async function codexRequestCompat(pi: ExtensionAPI): Promise<void
 	const state: CompatRuntimeState = {
 		metadata,
 		userAgent: await buildUserAgent(),
-		codexInstructions: await loadCodexInstructions(),
+		profiles: await loadWireProfiles(),
 		endpoints: mergeEndpoints(config.baseUrls),
 		logFailure: logTargetFailure,
 	};
@@ -70,16 +76,17 @@ export default async function codexRequestCompat(pi: ExtensionAPI): Promise<void
 	pi.on("session_tree", () => metadata.finishTree());
 
 	pi.on("before_provider_headers", (event, ctx) => {
-		if (!isCompatibleModel(ctx, providerIds)) return;
+		const profile = compatibleProfile(ctx, providerIds, state.profiles);
+		if (!profile) return;
 		const snapshot = metadata.createSnapshot();
-		const headers = buildCompatHeaders(event.headers as HeadersInit, state, snapshot);
+		const headers = buildCompatHeaders(event.headers as HeadersInit, state, profile, snapshot);
 		headers.forEach((value, key) => {
 			event.headers[key] = value;
 		});
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		if (!isCompatibleModel(ctx, providerIds) || !isObject(event.payload)) return;
+		if (!compatibleProfile(ctx, providerIds, state.profiles) || !isObject(event.payload)) return;
 		const snapshot = metadata.createSnapshot();
 		return {
 			...event.payload,
@@ -93,7 +100,13 @@ export default async function codexRequestCompat(pi: ExtensionAPI): Promise<void
 	pi.registerCommand("codex-compat:doctor", {
 		description: "Diagnose Codex request compatibility without making network requests",
 		handler: async (_args, ctx) => {
-			const report = await buildDoctorReport({ config, endpoints: state.endpoints, coordinator, ctx });
+			const report = await buildDoctorReport({
+				config,
+				endpoints: state.endpoints,
+				coordinator,
+				ctx,
+				profiles: state.profiles,
+			});
 			presentDoctorReport(report, ctx);
 		},
 	});

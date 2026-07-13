@@ -4,15 +4,7 @@ import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs
 import { arch, release, type } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import {
-	CODEX_VERSION,
-	COMPAT_DIR,
-	FALLBACK_CODEX_INSTRUCTIONS,
-	INSTALLATION_ID_PATH,
-	LEGACY_INSTRUCTIONS_PATH,
-	ORIGINATOR,
-	PACKAGED_INSTRUCTIONS_PATH,
-} from "./constants.ts";
+import { CODEX_VERSION, COMPAT_DIR, INSTALLATION_ID_PATH, ORIGINATOR } from "./constants.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const execFileAsync = promisify(execFile);
@@ -120,18 +112,6 @@ export async function buildUserAgent(): Promise<string> {
 	return sanitizeHeaderValue(
 		`${ORIGINATOR}/${CODEX_VERSION} (${osToken}; ${arch()}) ${terminal} (${ORIGINATOR}; ${CODEX_VERSION})`,
 	);
-}
-
-export async function loadCodexInstructions(): Promise<string> {
-	for (const path of [PACKAGED_INSTRUCTIONS_PATH, LEGACY_INSTRUCTIONS_PATH]) {
-		try {
-			const text = (await readFile(path, "utf8")).trim();
-			if (text) return text;
-		} catch {
-			// Try the next source.
-		}
-	}
-	return FALLBACK_CODEX_INSTRUCTIONS;
 }
 
 export class MetadataRuntime {

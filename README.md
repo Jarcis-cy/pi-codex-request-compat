@@ -1,6 +1,6 @@
 # pi-codex-request-compat
 
-A [Pi](https://pi.dev) extension that converts Pi's OpenAI Responses requests into the **Codex Responses Lite** wire shape used by strict Codex-compatible gateways.
+A [Pi](https://pi.dev) extension that converts Pi's OpenAI Responses requests into the **model-specific Codex wire shape** used by strict Codex-compatible gateways.
 
 > This package is version-sensitive compatibility glue, not an authentication bypass. You still need valid provider credentials and an account authorized to use the target model.
 
@@ -32,13 +32,11 @@ The extension matches only `POST` requests with string bodies whose URL origin a
 
 Pi uses the OpenAI JavaScript SDK for `openai-responses` providers. Some gateways only accept requests whose wire format matches the Rust Codex CLI. The two clients differ in headers and JSON shape even when they request the same model.
 
-For custom models, Codex 0.144.1 uses Responses Lite:
+Codex 0.144.1 uses two different request families:
 
-- tools live in an `input` item with `type: "additional_tools"`;
-- the Codex base prompt is a typed developer message;
-- request identity appears consistently in headers and `client_metadata`;
-- JavaScript SDK fingerprint headers are absent;
-- standard routing omits `service_tier`.
+- `gpt-5.4` and `gpt-5.5` use Standard Responses with model-specific top-level `instructions`, top-level `tools`, and parallel tool calls;
+- `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` use Responses Lite with `additional_tools`, serial tool calls, and `reasoning.context: "all_turns"`; Sol and Terra/Luna use different native developer prompts;
+- both families use consistent Codex request identity, omit JavaScript SDK fingerprints, and keep standard routing by omitting `service_tier`.
 
 ## Install
 
@@ -48,10 +46,10 @@ For custom models, Codex 0.144.1 uses Responses Lite:
 pi install /absolute/path/to/pi-codex-request-compat
 ```
 
-### Fixed v0.2.0 release
+### Fixed v0.2.1 release
 
 ```bash
-pi install git:github.com/Jarcis-cy/pi-codex-request-compat@v0.2.0
+pi install git:github.com/Jarcis-cy/pi-codex-request-compat@v0.2.1
 ```
 
 Restart Pi after installation and use `pi list` to confirm the package is enabled. Then create the required configuration file shown above.
@@ -69,12 +67,12 @@ The selected provider must use Pi's `openai-responses` API adapter. Example `~/.
       "apiKey": "YOUR_KEY",
       "models": [
         {
-          "id": "gpt-example",
-          "name": "GPT Example",
+          "id": "gpt-5.6-sol",
+          "name": "GPT-5.6 Sol",
           "reasoning": true,
           "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 10000
+          "contextWindow": 372000,
+          "maxTokens": 16384
         }
       ]
     }
@@ -84,24 +82,24 @@ The selected provider must use Pi's `openai-responses` API adapter. Example `~/.
 
 Do not commit real API keys. Prefer Pi authentication storage or environment-based secret handling where available.
 
+Supported runtime model IDs are exact and fail closed: `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. Unknown model IDs are left untouched instead of inheriting an incompatible profile; doctor reports the current model as unsupported.
+
 ## What it changes
 
 ### Headers
 
 - removes all `x-stainless-*` headers and the JavaScript adapter's `session_id` header;
-- sets the Codex Exec originator, User-Agent, SSE accept header, Responses Lite header, and beta feature header;
-- maintains installation, session, thread, window, and turn identity headers.
+- sets Codex Exec identity, User-Agent, SSE accept, beta feature, and request metadata headers;
+- adds `x-openai-internal-codex-responses-lite: true` only for the 5.6 profile and removes it for 5.4/5.5.
 
 ### Body
 
-- moves top-level tools to `input[0]` as `additional_tools` without renaming tools or changing their JSON schemas;
-- inserts the packaged Codex prompt as the only text-bearing developer message;
-- reclassifies Pi's system prompt as a typed user message wrapped in `<client_context>`;
-- removes `prompt_cache_retention`, `max_output_tokens`, and `service_tier`;
-- sets Lite controls including `tool_choice: "auto"`, `parallel_tool_calls: false`, and `reasoning.context: "all_turns"`;
-- always overwrites canonical `client_metadata` identity keys from the final headers, preventing stale body metadata from drifting from transport metadata.
+- `gpt-5.4` and `gpt-5.5`: sets the exact model-specific `instructions`, keeps Pi tool schemas at top-level `tools`, enables parallel tool calls, and omits `reasoning.context`;
+- `gpt-5.6-*`: moves Pi tools to `input[0].additional_tools`, inserts the exact Sol or Terra/Luna native prompt as the only text-bearing developer message, disables parallel tool calls, and sets `reasoning.context: "all_turns"`;
+- all profiles reclassify Pi's system prompt as a typed user message wrapped in `<client_context>`;
+- all profiles remove `prompt_cache_retention`, `max_output_tokens`, and `service_tier`, while canonicalizing header/body identity metadata.
 
-Reclassifying Pi's system prompt lowers its instruction priority from developer to user. This is an intentional compatibility trade-off: Pi-specific guidance remains available while the gateway sees an unmodified, version-matched Codex developer prompt.
+Reclassifying Pi's system prompt lowers its instruction priority from developer to user. This is an intentional compatibility trade-off: Pi-specific guidance remains available while the gateway sees the exact versioned Codex instructions for the selected model.
 
 ### Standard tier enforcement
 
@@ -114,7 +112,7 @@ Fallback and subagent requests need no external patch when either condition is t
 - Pi's normal provider hooks add the direct `originator: codex_exec` marker; or
 - the outgoing request exactly matches an automatically discovered or explicitly configured Responses endpoint.
 
-For an exact endpoint match, the fetch layer is self-contained: it derives installation, session, thread, turn, window, and request-kind metadata from the active session runtime, adds Codex/Lite headers, and canonicalizes body metadata. A custom `streamSimple` implementation therefore does not need to inject its own marker or metadata as long as it ultimately calls the process-global `fetch` with `POST`, a string JSON body, and the configured endpoint URL. Pi subagents that load the package receive the same behavior in their own process.
+For an exact endpoint match, the fetch layer is self-contained: it derives installation, session, thread, turn, window, and request-kind metadata from the active session runtime, selects the profile from the JSON body's `model`, adds the matching Codex headers, and canonicalizes body metadata. A custom `streamSimple` implementation therefore does not need to inject its own marker or metadata as long as it ultimately calls the process-global `fetch` with `POST`, a string JSON body, and the configured endpoint URL. Pi subagents that load the package receive the same behavior in their own process.
 
 Custom transports that never call global `fetch`, non-string request bodies, and endpoints absent from both the model registry and `baseUrls` are outside this fallback path.
 
@@ -134,19 +132,20 @@ Run:
 /codex-compat:doctor
 ```
 
-Doctor makes no network requests. It reports package and Codex baseline versions, config source/path, provider IDs, resolved endpoints, current-provider matching, provider existence, API adapter, packaged prompt SHA, fetch-patch status, duplicate instances, and standard-tier enforcement. Warnings and errors are explicit. TUI sessions receive a notification; non-UI modes print the report to stdout.
+Doctor makes no network requests. It reports package and Codex baseline versions, config source/path, provider IDs, resolved endpoints, current-provider matching, API adapter, selected wire profile, every packaged profile SHA, fetch-patch status, duplicate instances, and standard-tier enforcement. Warnings and errors are explicit. TUI sessions receive a notification; non-UI modes print the report to stdout.
 
-The expected packaged prompt SHA-256 is:
+## Prompt baselines
+
+Codex 0.144.1 profile assets are stored under `assets/codex-0.144.1/` and are validated byte-for-byte at startup:
 
 ```text
-e9778714d505f3dd04d44db4394024c5fab5bf6554fc9faa3cdf9cf776b63bb9
+gpt-5.4-standard                  478e8a11b180adb2659f21aba51744711f79f665039bb0bc4a13d3c051fcb76c
+gpt-5.5-standard                  c2a980bc28af132eb89e0b4c68ae884043faae83a1afd3fd4889f7e8a1ada7b0
+gpt-5.6-sol-responses-lite        e9778714d505f3dd04d44db4394024c5fab5bf6554fc9faa3cdf9cf776b63bb9
+gpt-5.6-terra-luna-responses-lite 78a2fc84e1bffa421d865c1a2ade4185d3d33ef38e6a15157f0ff1a89b7d52ec
 ```
 
-## Prompt baseline
-
-The version-matched native prompt is stored in `assets/codex-instructions.txt`. The packaged asset takes precedence because strict gateways may validate it byte-for-byte. The legacy user-side `~/.pi/agent/codex-request-compat/codex-instructions.txt` is used only if the packaged asset cannot be read.
-
-Update the prompt asset, User-Agent version, expected hash, and captured baseline together.
+The 5.4/5.5 assets are the official pragmatic-personality `instructions`; Sol and Terra/Luna use separate native Lite developer prompts. Update the assets, profile rules, User-Agent version, expected hashes, and captured baselines together. Legacy user-side prompt overrides are intentionally ignored.
 
 ## Diagnostics and privacy
 
@@ -157,7 +156,6 @@ config.json
 installation-id
 request-debug.log
 last-failed-request.json
-codex-instructions.txt
 ```
 
 On matched HTTP 4xx/5xx responses, the extension records redacted headers, the transformed body, and the response. Diagnostic files and the installation ID are forced to mode `0600`; the directory is mode `0700`. Request bodies can contain sensitive prompts and file excerpts, so review and redact diagnostics before sharing them.
@@ -176,16 +174,22 @@ npm pack --dry-run
 
 ```text
 pi-codex-request-compat/
-├── assets/codex-instructions.txt
+├── assets/codex-0.144.1/
+│   ├── gpt-5.4-standard.txt
+│   ├── gpt-5.5-standard.txt
+│   ├── gpt-5.6-responses-lite.txt
+│   └── gpt-5.6-terra-luna-responses-lite.txt
 ├── config/default.json
 ├── extensions/codex-request-compat/
 │   ├── index.ts
+│   ├── profiles.ts
 │   ├── constants.ts
 │   ├── config.ts
 │   ├── metadata.ts
 │   ├── transform.ts
 │   └── diagnostics.ts
 ├── tests/compat.test.mjs
+├── tests/compaction.integration.mjs
 ├── package.json
 └── README.md
 ```

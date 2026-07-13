@@ -48,7 +48,7 @@ function createHarness() {
 const sessionId = "019f5647-4977-7afd-9247-08ec1ba72561";
 const model = {
   provider: "codex",
-  id: "gpt-example",
+  id: "gpt-5.6-sol",
   api: "openai-responses",
   baseUrl: "http://capture.local/api/v1/",
 };
@@ -70,7 +70,7 @@ function createContext(overrides = {}) {
 
 function baseBody(overrides = {}) {
   return {
-    model: "gpt-example",
+    model: "gpt-5.6-sol",
     input: [
       { role: "developer", content: "Pi system prompt" },
       { role: "user", content: [{ type: "input_text", text: "hello" }] },
@@ -106,6 +106,14 @@ try {
 
   const { loadConfig } = await import("../extensions/codex-request-compat/config.ts");
   assert.deepEqual((await loadConfig()).providerIds, ["codex"]);
+  const { profileIdForModel } = await import("../extensions/codex-request-compat/profiles.ts");
+  assert.equal(profileIdForModel("gpt-5.4"), "gpt-5.4-standard");
+  assert.equal(profileIdForModel("gpt-5.5"), "gpt-5.5-standard");
+  assert.equal(profileIdForModel("gpt-5.6-sol"), "gpt-5.6-sol-responses-lite");
+  assert.equal(profileIdForModel("gpt-5.6-terra"), "gpt-5.6-terra-luna-responses-lite");
+  assert.equal(profileIdForModel("gpt-5.6-luna"), "gpt-5.6-terra-luna-responses-lite");
+  assert.equal(profileIdForModel("gpt-5.4-mini"), undefined);
+  assert.equal(profileIdForModel("gpt-5.7-unknown"), undefined);
 
   await writeFile(userConfigPath, JSON.stringify({
     providerIds: [" custom ", "custom"],
@@ -209,7 +217,10 @@ try {
   assert.equal("max_output_tokens" in directBody, false);
   assert.deepEqual(directBody.input[0].tools, baseBody().tools, "tool schema must remain byte-for-byte equivalent");
 
-  const packagedPrompt = (await readFile(new URL("../assets/codex-instructions.txt", import.meta.url), "utf8")).trim();
+  const packagedPrompt = await readFile(
+    new URL("../assets/codex-0.144.1/gpt-5.6-responses-lite.txt", import.meta.url),
+    "utf8",
+  );
   assert.equal(createHash("sha256").update(packagedPrompt).digest("hex"), "e9778714d505f3dd04d44db4394024c5fab5bf6554fc9faa3cdf9cf776b63bb9");
   const nativePrompts = directBody.input.filter((item) => item.type === "message" && item.role === "developer");
   assert.equal(nativePrompts.length, 1, "only one native developer prompt may remain");
@@ -219,6 +230,104 @@ try {
     role: "user",
     content: [{ type: "input_text", text: "<client_context>\nPi system prompt\n</client_context>" }],
   });
+
+  const terraLunaPrompt = await readFile(
+    new URL("../assets/codex-0.144.1/gpt-5.6-terra-luna-responses-lite.txt", import.meta.url),
+    "utf8",
+  );
+  assert.equal(
+    createHash("sha256").update(terraLunaPrompt).digest("hex"),
+    "78a2fc84e1bffa421d865c1a2ade4185d3d33ef38e6a15157f0ff1a89b7d52ec",
+  );
+  for (const liteModel of ["gpt-5.6-terra", "gpt-5.6-luna"]) {
+    const liteCall = await send("http://capture.local/api/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(baseBody({ model: liteModel })),
+    });
+    const liteBody = JSON.parse(liteCall.init.body);
+    const litePrompts = liteBody.input.filter((item) => item.type === "message" && item.role === "developer");
+    assert.equal(liteCall.init.headers.get("x-openai-internal-codex-responses-lite"), "true");
+    assert.equal(liteBody.input[0].type, "additional_tools");
+    assert.equal(litePrompts.length, 1);
+    assert.equal(litePrompts[0].content[0].text, terraLunaPrompt);
+    assert.equal(liteBody.parallel_tool_calls, false);
+    assert.equal(liteBody.reasoning.context, "all_turns");
+  }
+
+  const standardProfiles = [
+    {
+      model: "gpt-5.4",
+      path: "../assets/codex-0.144.1/gpt-5.4-standard.txt",
+      sha: "478e8a11b180adb2659f21aba51744711f79f665039bb0bc4a13d3c051fcb76c",
+    },
+    {
+      model: "gpt-5.5",
+      path: "../assets/codex-0.144.1/gpt-5.5-standard.txt",
+      sha: "c2a980bc28af132eb89e0b4c68ae884043faae83a1afd3fd4889f7e8a1ada7b0",
+    },
+  ];
+  let lastStandardBody;
+  let lastStandardHeaders;
+  for (const standard of standardProfiles) {
+    const instructions = await readFile(new URL(standard.path, import.meta.url), "utf8");
+    assert.equal(createHash("sha256").update(instructions).digest("hex"), standard.sha);
+    const standardHeaderEvent = { type: "before_provider_headers", headers: {} };
+    await harness.emit(
+      "before_provider_headers",
+      standardHeaderEvent,
+      createContext({ model: { ...model, id: standard.model } }),
+    );
+    assert.equal(standardHeaderEvent.headers.originator, "codex_exec");
+    assert.equal("x-openai-internal-codex-responses-lite" in standardHeaderEvent.headers, false);
+    const standardCall = await send("http://capture.local/api/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-openai-internal-codex-responses-lite": "true",
+      },
+      body: JSON.stringify(baseBody({ model: standard.model })),
+    });
+    lastStandardHeaders = standardCall.init.headers;
+    lastStandardBody = JSON.parse(standardCall.init.body);
+    assert.equal(lastStandardHeaders.get("originator"), "codex_exec");
+    assert.equal(lastStandardHeaders.has("x-openai-internal-codex-responses-lite"), false);
+    assert.equal(lastStandardBody.instructions, instructions);
+    assert.deepEqual(lastStandardBody.tools, baseBody().tools);
+    assert.equal(lastStandardBody.input.some((item) => item.type === "additional_tools"), false);
+    assert.equal(lastStandardBody.input.some((item) => item.role === "developer"), false);
+    assert.equal(lastStandardBody.input[0].role, "user");
+    assert.equal(lastStandardBody.input[0].content[0].text, "<client_context>\nPi system prompt\n</client_context>");
+    assert.equal(lastStandardBody.parallel_tool_calls, true);
+    assert.deepEqual(lastStandardBody.reasoning, { effort: "high" });
+    assert.equal("service_tier" in lastStandardBody, false);
+    assert.equal("prompt_cache_retention" in lastStandardBody, false);
+    assert.equal("max_output_tokens" in lastStandardBody, false);
+  }
+  const standardTwice = await send("http://capture.local/api/v1/responses", {
+    method: "POST",
+    headers: lastStandardHeaders,
+    body: JSON.stringify(lastStandardBody),
+  });
+  const standardTwiceBody = JSON.parse(standardTwice.init.body);
+  assert.equal(standardTwiceBody.instructions, lastStandardBody.instructions);
+  assert.deepEqual(standardTwiceBody.tools, baseBody().tools);
+  assert.equal(standardTwiceBody.input.filter((item) => item.role === "developer").length, 0);
+
+  const unknownInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(baseBody({ model: "gpt-5.7-unknown" })),
+  };
+  const unknown = await send("http://capture.local/api/v1/responses", unknownInit);
+  assert.equal(unknown.init, unknownInit, "unknown models must not inherit the gpt-5.6 Lite profile");
+  const unknownHeaderEvent = { type: "before_provider_headers", headers: {} };
+  await harness.emit(
+    "before_provider_headers",
+    unknownHeaderEvent,
+    createContext({ model: { ...model, id: "gpt-5.7-unknown" } }),
+  );
+  assert.deepEqual(unknownHeaderEvent.headers, {}, "unknown models must not receive Codex identity markers");
 
   const urlOnly = await send("http://capture.local/api/v1/responses?trace=1", {
     method: "POST",
@@ -320,9 +429,14 @@ try {
   } finally {
     console.log = realConsoleLog;
   }
-  assert.match(logs[0], /package: 0\.2\.0/);
+  assert.match(logs[0], /package: 0\.2\.1/);
   assert.match(logs[0], /configured providers exist: true/);
   assert.match(logs[0], /current api openai-responses: true/);
+  assert.match(logs[0], /current wire profile: gpt-5\.6-sol-responses-lite/);
+  assert.match(logs[0], /gpt-5\.4-standard=.* \(standard\)/);
+  assert.match(logs[0], /gpt-5\.5-standard=.* \(standard\)/);
+  assert.match(logs[0], /gpt-5\.6-sol-responses-lite=.* \(responses-lite\)/);
+  assert.match(logs[0], /gpt-5\.6-terra-luna-responses-lite=.* \(responses-lite\)/);
   assert.match(logs[0], /fetch patch: active/);
   assert.match(logs[0], /active instances: 1/);
   assert.match(logs[0], /warnings: none/);
@@ -350,7 +464,7 @@ try {
   await harness.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
 
   assert.equal(globalThis.fetch === originalFetchStub, false, "global fetch is wrapped exactly once and retained safely");
-  console.log("PASS: config, exact URL fallback, metadata lifecycle, hot reload, doctor, Lite shape, and standard tier");
+  console.log("PASS: config, exact URL fallback, metadata lifecycle, model profiles, hot reload, doctor, and standard tier");
 } finally {
   await rm(agentDir, { recursive: true, force: true });
 }

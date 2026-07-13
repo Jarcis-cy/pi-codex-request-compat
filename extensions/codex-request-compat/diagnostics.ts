@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { appendFile, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, writeFile } from "node:fs/promises";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { CompatConfig } from "./config.ts";
 import {
@@ -7,10 +6,10 @@ import {
 	COMPAT_DIR,
 	DEBUG_LAST_FAILURE_PATH,
 	DEBUG_LOG_PATH,
-	EXPECTED_PROMPT_SHA,
+	EXPECTED_PROFILE_SHAS,
 	PACKAGE_VERSION,
-	PACKAGED_INSTRUCTIONS_PATH,
 } from "./constants.ts";
+import { selectWireProfile, type CodexWireProfile, type WireProfileId } from "./profiles.ts";
 import { getFetchCoordinator, type FetchCoordinator, type ResolvedEndpoint } from "./transform.ts";
 
 function isSensitiveHeader(name: string): boolean {
@@ -123,6 +122,7 @@ export interface DoctorInput {
 	endpoints: ResolvedEndpoint[];
 	coordinator: FetchCoordinator;
 	ctx: ExtensionCommandContext;
+	profiles: ReadonlyMap<WireProfileId, CodexWireProfile>;
 }
 
 export interface DoctorResult {
@@ -132,7 +132,7 @@ export interface DoctorResult {
 }
 
 export async function buildDoctorReport(input: DoctorInput): Promise<DoctorResult> {
-	const { config, endpoints, coordinator, ctx } = input;
+	const { config, endpoints, coordinator, ctx, profiles } = input;
 	const models = ctx.modelRegistry.getAll();
 	const currentProvider = ctx.model?.provider;
 	const configuredProviders = new Set(config.providerIds);
@@ -144,8 +144,13 @@ export async function buildDoctorReport(input: DoctorInput): Promise<DoctorResul
 			!models.some((model) => model.provider === provider && model.api === "openai-responses"),
 	);
 	const currentProviderMatches = currentProvider !== undefined && configuredProviders.has(currentProvider);
-	const prompt = await readFile(PACKAGED_INSTRUCTIONS_PATH, "utf8");
-	const promptSha = createHash("sha256").update(prompt.trim()).digest("hex");
+	const currentProfile = selectWireProfile(profiles, ctx.model?.id);
+	const profileIntegrityHealthy = [...profiles.values()].every(
+		(profile) => profile.instructionsSha === EXPECTED_PROFILE_SHAS[profile.id],
+	);
+	const profileSummary = [...profiles.values()]
+		.map((profile) => `${profile.id}=${profile.instructionsSha} (${profile.wireMode})`)
+		.join(", ");
 	const fetchPatchHealthy = getFetchCoordinator() === coordinator && globalThis.fetch === coordinator.patchedFetch;
 	const warnings = [...config.warnings];
 	const errors: string[] = [];
@@ -157,7 +162,10 @@ export async function buildDoctorReport(input: DoctorInput): Promise<DoctorResul
 		errors.push(`current configured model api is ${ctx.model?.api}`);
 	}
 	if (currentProvider && !currentProviderMatches) warnings.push(`current provider is not selected by providerIds: ${currentProvider}`);
-	if (promptSha !== EXPECTED_PROMPT_SHA) errors.push("packaged prompt SHA does not match the expected baseline");
+	if (currentProviderMatches && ctx.model?.api === "openai-responses" && !currentProfile) {
+		warnings.push(`current model has no Codex wire profile: ${ctx.model.id}`);
+	}
+	if (!profileIntegrityHealthy) errors.push("packaged wire profile SHA does not match the expected baseline");
 	if (!fetchPatchHealthy) errors.push("global fetch patch is inactive or replaced");
 	if (coordinator.states.size > 1) warnings.push(`duplicate active instances: ${coordinator.states.size}`);
 	if (!endpoints.length) warnings.push("no resolved Responses endpoints");
@@ -174,7 +182,8 @@ export async function buildDoctorReport(input: DoctorInput): Promise<DoctorResul
 		`configured providers exist: ${missingProviders.length === 0}`,
 		`configured providers openai-responses: ${incompatibleProviders.length === 0}`,
 		`current api openai-responses: ${ctx.model?.api === "openai-responses"}`,
-		`packaged prompt SHA: ${promptSha} (${promptSha === EXPECTED_PROMPT_SHA ? "expected" : "MISMATCH"})`,
+		`current wire profile: ${currentProfile?.id ?? "unsupported"}`,
+		`packaged wire profiles: ${profileSummary}`,
 		`fetch patch: ${fetchPatchHealthy ? "active" : "inactive"}`,
 		`active instances: ${coordinator.states.size}`,
 		`standard tier enforcement: enabled (service_tier removed)`,

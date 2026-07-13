@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { FETCH_PATCH_KEY, ORIGINATOR } from "./constants.ts";
 import type { MetadataRuntime, MetadataSnapshot } from "./metadata.ts";
+import { selectWireProfile, type CodexWireProfile, type WireProfileId } from "./profiles.ts";
 
 export interface CompatRuntimeState {
 	metadata: MetadataRuntime;
 	userAgent: string;
-	codexInstructions: string;
+	profiles: ReadonlyMap<WireProfileId, CodexWireProfile>;
 	endpoints: ResolvedEndpoint[];
 	logFailure: (input: RequestInfo | URL, init: RequestInit, response: Response) => Promise<void>;
 }
@@ -98,6 +99,7 @@ function applyMetadataHeaders(headers: Headers, metadata: MetadataSnapshot): voi
 export function buildCompatHeaders(
 	headers: HeadersInit | undefined,
 	state: CompatRuntimeState,
+	profile: CodexWireProfile,
 	metadata = state.metadata.createSnapshot(),
 ): Headers {
 	const out = new Headers(headers ?? {});
@@ -110,7 +112,11 @@ export function buildCompatHeaders(
 	out.set("originator", ORIGINATOR);
 	out.set("user-agent", state.userAgent);
 	out.set("accept", "text/event-stream");
-	out.set("x-openai-internal-codex-responses-lite", "true");
+	if (profile.wireMode === "responses-lite") {
+		out.set("x-openai-internal-codex-responses-lite", "true");
+	} else {
+		out.delete("x-openai-internal-codex-responses-lite");
+	}
 	out.set("x-codex-beta-features", "memories,prevent_idle_sleep,remote_compaction_v2");
 	applyMetadataHeaders(out, metadata);
 	return out;
@@ -131,12 +137,15 @@ function canonicalClientMetadata(
 	};
 }
 
-function isCodexPromptItem(value: unknown, instructions: string): boolean {
+function isCodexPromptItem(value: unknown, profiles: CompatRuntimeState["profiles"]): boolean {
 	if (!isObject(value) || value.type !== "message" || value.role !== "developer") return false;
 	if (!Array.isArray(value.content) || value.content.length !== 1) return false;
 	const content = value.content[0];
 	if (!isObject(content) || content.type !== "input_text" || typeof content.text !== "string") return false;
-	return content.text === instructions || content.text.startsWith("You are Codex");
+	return (
+		content.text.startsWith("You are Codex") ||
+		[...profiles.values()].some((profile) => content.text === profile.instructions)
+	);
 }
 
 function isAdditionalToolsItem(value: unknown): boolean {
@@ -152,72 +161,87 @@ export function transformRequest(
 	const directMarker = getHeader(init.headers, "originator") === ORIGINATOR;
 	if (!directMarker && !matchesEndpoint(input, state.endpoints)) return undefined;
 
-	const metadata = state.metadata.createSnapshot();
-	const next: RequestInit = { ...init, headers: buildCompatHeaders(init.headers, state, metadata) };
+	let payload: unknown;
 	try {
-		const payload: unknown = JSON.parse(init.body);
-		if (!isObject(payload)) return next;
-		const body: Record<string, unknown> = { ...payload };
-		body.client_metadata = canonicalClientMetadata(body.client_metadata, metadata);
+		payload = JSON.parse(init.body);
+	} catch {
+		return undefined;
+	}
+	if (!isObject(payload)) return undefined;
+	const profile = selectWireProfile(state.profiles, payload.model);
+	if (!profile) return undefined;
 
-		const originalInput = Array.isArray(body.input) ? body.input : [];
-		const existingToolsItem = originalInput.find(isAdditionalToolsItem);
-		const tools = Array.isArray(body.tools)
-			? body.tools
-			: isObject(existingToolsItem) && Array.isArray(existingToolsItem.tools)
-				? existingToolsItem.tools
-				: [];
-		const normalizedInput = originalInput
-			.filter((item) => !isAdditionalToolsItem(item) && !isCodexPromptItem(item, state.codexInstructions))
-			.map((item) => {
-				if (!isObject(item) || typeof item.role !== "string") return item;
-				const supplemental = item.role === "developer" || item.role === "system";
-				const role = supplemental ? "user" : item.role;
-				if (typeof item.content === "string") {
-					const text = supplemental ? `<client_context>\n${item.content}\n</client_context>` : item.content;
-					return { ...item, type: "message", role, content: [{ type: "input_text", text }] };
-				}
-				if (Array.isArray(item.content)) {
-					const content = supplemental
-						? [
-								{ type: "input_text", text: "<client_context>" },
-								...item.content,
-								{ type: "input_text", text: "</client_context>" },
-							]
-						: item.content;
-					return { ...item, type: "message", role, content };
-				}
-				return item;
-			});
+	const metadata = state.metadata.createSnapshot();
+	const next: RequestInit = { ...init, headers: buildCompatHeaders(init.headers, state, profile, metadata) };
+	const body: Record<string, unknown> = { ...payload };
+	body.client_metadata = canonicalClientMetadata(body.client_metadata, metadata);
+
+	const originalInput = Array.isArray(body.input) ? body.input : [];
+	const existingToolsItem = originalInput.find(isAdditionalToolsItem);
+	const tools = Array.isArray(body.tools)
+		? body.tools
+		: isObject(existingToolsItem) && Array.isArray(existingToolsItem.tools)
+			? existingToolsItem.tools
+			: [];
+	const normalizedInput = originalInput
+		.filter((item) => !isAdditionalToolsItem(item) && !isCodexPromptItem(item, state.profiles))
+		.map((item) => {
+			if (!isObject(item) || typeof item.role !== "string") return item;
+			const supplemental = item.role === "developer" || item.role === "system";
+			const role = supplemental ? "user" : item.role;
+			if (typeof item.content === "string") {
+				const text = supplemental ? `<client_context>\n${item.content}\n</client_context>` : item.content;
+				return { ...item, type: "message", role, content: [{ type: "input_text", text }] };
+			}
+			if (Array.isArray(item.content)) {
+				const content = supplemental
+					? [
+							{ type: "input_text", text: "<client_context>" },
+							...item.content,
+							{ type: "input_text", text: "</client_context>" },
+						]
+					: item.content;
+				return { ...item, type: "message", role, content };
+			}
+			return item;
+		});
+
+	if (profile.wireMode === "responses-lite") {
 		body.input = [
 			{ type: "additional_tools", role: "developer", tools },
 			{
 				type: "message",
 				role: "developer",
-				content: [{ type: "input_text", text: state.codexInstructions }],
+				content: [{ type: "input_text", text: profile.instructions }],
 			},
 			...normalizedInput,
 		];
-		for (const key of ["tools", "instructions", "prompt_cache_retention", "max_output_tokens"]) delete body[key];
-		body.tool_choice = "auto";
+		delete body.tools;
+		delete body.instructions;
 		body.parallel_tool_calls = false;
-		const reasoning = isObject(body.reasoning) ? body.reasoning : {};
-		body.reasoning = {
-			...(typeof reasoning.effort === "string" ? { effort: reasoning.effort } : {}),
-			context: "all_turns",
-		};
-		const text = isObject(body.text) ? body.text : {};
-		body.text = {
-			...(isObject(text.format) ? { format: text.format } : {}),
-			verbosity: typeof text.verbosity === "string" ? text.verbosity : "low",
-		};
-		delete body.service_tier;
-		body.store = false;
-		body.stream = true;
-		next.body = JSON.stringify(body);
-	} catch {
-		// Headers remain compatible when the string body is not JSON.
+	} else {
+		body.input = normalizedInput;
+		body.tools = tools;
+		body.instructions = profile.instructions;
+		body.parallel_tool_calls = true;
 	}
+	delete body.prompt_cache_retention;
+	delete body.max_output_tokens;
+	body.tool_choice = "auto";
+	const reasoning = isObject(body.reasoning) ? body.reasoning : {};
+	body.reasoning = {
+		...(typeof reasoning.effort === "string" ? { effort: reasoning.effort } : {}),
+		...(profile.wireMode === "responses-lite" ? { context: "all_turns" } : {}),
+	};
+	const text = isObject(body.text) ? body.text : {};
+	body.text = {
+		...(isObject(text.format) ? { format: text.format } : {}),
+		verbosity: typeof text.verbosity === "string" ? text.verbosity : "low",
+	};
+	delete body.service_tier;
+	body.store = false;
+	body.stream = true;
+	next.body = JSON.stringify(body);
 	return next;
 }
 

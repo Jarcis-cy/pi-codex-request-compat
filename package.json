@@ -1,7 +1,7 @@
 {
   "name": "pi-codex-request-compat",
-  "version": "0.2.0",
-  "description": "Pi extension that converts OpenAI Responses requests into the Codex Responses Lite wire shape expected by strict Codex gateways.",
+  "version": "0.2.1",
+  "description": "Pi extension that emits model-aware Codex Standard Responses or Responses Lite wire shapes for strict Codex gateways.",
   "type": "module",
   "license": "MIT",
   "author": "jarcis-cy",
@@ -29,7 +29,7 @@
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --experimental-strip-types --no-warnings tests/compat.test.mjs && node --experimental-strip-types --no-warnings tests/compaction.integration.mjs",
+    "test": "node --experimental-strip-types --no-warnings tests/compat.test.mjs && node --experimental-strip-types --no-warnings tests/compaction.integration.mjs gpt-5.4 && node --experimental-strip-types --no-warnings tests/compaction.integration.mjs gpt-5.5 && node --experimental-strip-types --no-warnings tests/compaction.integration.mjs gpt-5.6-sol && node --experimental-strip-types --no-warnings tests/compaction.integration.mjs gpt-5.6-terra && node --experimental-strip-types --no-warnings tests/compaction.integration.mjs gpt-5.6-luna",
     "verify": "npm run typecheck && npm test",
     "pack:check": "npm pack --dry-run"
   },
