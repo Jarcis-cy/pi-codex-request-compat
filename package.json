@@ -1,0 +1,48 @@
+{
+  "name": "pi-codex-request-compat",
+  "version": "0.1.0",
+  "description": "Pi extension that converts OpenAI Responses requests into the Codex Responses Lite wire shape expected by strict Codex gateways.",
+  "type": "module",
+  "license": "MIT",
+  "author": "jarcis-cy",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jarcis-cy/pi-codex-request-compat.git"
+  },
+  "homepage": "https://github.com/Jarcis-cy/pi-codex-request-compat#readme",
+  "bugs": {
+    "url": "https://github.com/Jarcis-cy/pi-codex-request-compat/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "codex",
+    "openai-responses",
+    "responses-lite"
+  ],
+  "files": [
+    "assets",
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --no-warnings tests/compat.test.mjs",
+    "verify": "npm run typecheck && npm test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/codex-request-compat.ts"
+    ]
+  }
+}

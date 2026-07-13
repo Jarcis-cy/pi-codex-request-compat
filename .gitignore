@@ -1,0 +1,10 @@
+node_modules/
+*.tgz
+.DS_Store
+coverage/
+
+# Runtime state belongs in ~/.pi/agent/codex-request-compat, never in this repo.
+installation-id
+request-debug.log
+last-failed-request.json
+accepted-codex-request.json
